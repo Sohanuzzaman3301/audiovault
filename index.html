@@ -1,0 +1,378 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Audiobook Summary Browser</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <style>
+        body {
+            background-color: #0a0a0a;
+            color: #e0e0e0;
+        }
+        .book-card {
+            transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+        }
+        .book-card:hover {
+            transform: scale(1.03);
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.5);
+        }
+        .modal-bg {
+            background-color: rgba(0,0,0,0.95);
+            backdrop-filter: blur(12px);
+        }
+        /* Flip Animation */
+        .stage-container {
+            perspective: 1000px;
+            width: 100%;
+            height: 70vh;
+        }
+        .stage-inner {
+            position: relative;
+            width: 100%;
+            height: 100%;
+            transition: transform 0.6s cubic-bezier(0.4, 0, 0.2, 1);
+            transform-style: preserve-3d;
+        }
+        .is-flipped .stage-inner {
+            transform: rotateY(180deg);
+        }
+        .stage-front, .stage-back {
+            position: absolute;
+            width: 100%;
+            height: 100%;
+            backface-visibility: hidden;
+            border-radius: 1rem;
+            overflow: hidden;
+        }
+        .stage-back {
+            transform: rotateY(180deg);
+            background: #121212;
+            border: 1px solid #333;
+        }
+        .transcript-container {
+            scrollbar-width: thin;
+            scrollbar-color: #444 #0a0a0a;
+        }
+        .srt-line {
+            display: flex;
+            gap: 1.5rem;
+            padding: 0.75rem;
+            border-bottom: 1px solid #1a1a1a;
+            transition: background 0.2s;
+        }
+        .srt-time {
+            color: #ff6b35;
+            font-family: monospace;
+            font-weight: bold;
+            font-size: 0.9rem;
+            opacity: 0.7;
+        }
+        audio {
+            width: 100%;
+            filter: invert(100%) hue-rotate(180deg) brightness(1.5);
+        }
+    </style>
+</head>
+<body class="font-sans">
+    <header class="p-8 bg-[#080808] sticky top-0 z-10 border-b border-[#1a1a1a]">
+        <div class="max-w-7xl mx-auto flex flex-col md:flex-row justify-between items-center gap-8">
+            <h1 class="text-3xl font-black tracking-tighter text-white uppercase italic">Audio<span class="text-orange-600">Vault</span></h1>
+            <input type="text" id="search" placeholder="Quick search..." 
+                class="w-full md:w-96 px-6 py-3 bg-[#111] border border-[#222] rounded-full text-white focus:outline-none focus:border-orange-600 transition-all">
+        </div>
+    </header>
+
+    <main class="max-w-[1800px] mx-auto p-10">
+        <div id="booksGrid" class="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 xl:grid-cols-10 gap-6">
+            <p class="col-span-full text-center text-gray-600 animate-pulse">Scanning Archive...</p>
+        </div>
+    </main>
+
+    <!-- Minimal Stage Modal -->
+    <div id="modal" class="hidden fixed inset-0 z-50 modal-bg flex items-center justify-center p-6">
+        <div class="w-full max-w-4xl flex flex-col gap-6">
+            <!-- Header -->
+            <div class="flex justify-between items-end px-2">
+                <div>
+                    <h2 id="modalTitle" class="text-2xl font-bold text-white"></h2>
+                    <p id="modalAuthor" class="text-orange-500 font-medium"></p>
+                </div>
+                <button id="closeModal" class="text-gray-500 hover:text-white text-5xl leading-none">&times;</button>
+            </div>
+
+            <!-- Central Flip Stage -->
+            <div id="stage" class="stage-container">
+                <div class="stage-inner">
+                    <!-- Front: Image -->
+                    <div class="stage-front bg-[#111] border border-[#222] shadow-2xl">
+                        <img id="modalCover" src="" class="w-full h-full object-contain">
+                    </div>
+                    <!-- Back: Transcript -->
+                    <div class="stage-back p-10 overflow-y-auto transcript-container shadow-2xl">
+                        <div id="transcriptContent" class="text-gray-300"></div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Footer Controls -->
+            <div class="flex flex-col md:flex-row items-center gap-6 bg-[#111] p-6 rounded-2xl border border-[#222]">
+                <button id="toggleView" class="w-full md:w-auto bg-orange-600 hover:bg-orange-700 text-white px-8 py-3 rounded-xl font-bold transition-all shadow-lg shadow-orange-900/20">
+                    Flip to Text
+                </button>
+                <div class="flex-1 w-full">
+                    <audio id="audioPlayer" controls></audio>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        let allBooks = [];
+        const imageCache = new Set();
+
+        async function fetchBooks() {
+            try {
+                const response = await fetch('/api/books');
+                allBooks = await response.json();
+                renderBooks();
+                preloadImages();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('booksGrid').innerHTML = '<p class="text-red-500">Failed to connect.</p>';
+            }
+        }
+
+        function preloadImages() {
+            allBooks.forEach(book => {
+                if (book.cover && !imageCache.has(book.cover)) {
+                    const img = new Image();
+                    img.src = book.cover;
+                    imageCache.add(book.cover);
+                }
+            });
+        }
+
+        function renderBooks() {
+            const grid = document.getElementById('booksGrid');
+            grid.innerHTML = allBooks.map(book => `
+                <div class="book-card cursor-pointer group" onclick="openBook('${book.id}')">
+                    <div class="aspect-[3/4] bg-[#111] rounded-lg overflow-hidden border border-[#1a1a1a] shadow-lg">
+                        <img src="${book.cover || 'https://via.placeholder.com/300x400?text=No+Cover'}" 
+                             loading="lazy" class="w-full h-full object-cover grayscale-[0.3] group-hover:grayscale-0 transition-all">
+                    </div>
+                    <h3 class="font-bold text-[11px] text-gray-300 mt-2 line-clamp-1 group-hover:text-orange-500 transition-colors uppercase tracking-wider">${book.title}</h3>
+                </div>
+            `).join('');
+        }
+
+        function formatSRT(srtText) {
+            const lines = srtText.split('\n');
+            let html = '<div class="space-y-2">';
+            let currentText = '';
+            let currentTime = '';
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (/^\d+$/.test(line)) continue;
+                if (line.includes(' --> ')) {
+                    currentTime = line.split(' --> ')[0].split(',')[0];
+                    continue;
+                }
+                if (line === '') {
+                    if (currentText) {
+                        html += `<div class="srt-line"><span class="srt-time">${currentTime}</span><p class="text-lg">${currentText}</p></div>`;
+                        currentText = '';
+                    }
+                    continue;
+                }
+                currentText += (currentText ? ' ' : '') + line;
+            }
+            return html + '</div>';
+        }
+
+        function openBook(id) {
+            const book = allBooks.find(b => b.id === id);
+            if (!book) return;
+
+            document.getElementById('modalTitle').textContent = book.title;
+            document.getElementById('modalAuthor').textContent = book.author;
+            document.getElementById('modalCover').src = book.cover || 'https://via.placeholder.com/300x400?text=No+Cover';
+            
+            const player = document.getElementById('audioPlayer');
+            player.src = book.audio;
+            
+            const transcriptDiv = document.getElementById('transcriptContent');
+            transcriptDiv.innerHTML = '<p class="text-center py-20 text-gray-600 italic">Decoding transcript...</p>';
+            
+            if (book.transcript) {
+                fetch(book.transcript).then(r => r.text()).then(text => {
+                    transcriptDiv.innerHTML = book.transcript.endsWith('.srt') ? formatSRT(text) : marked.parse(text);
+                });
+            } else {
+                transcriptDiv.innerHTML = '<p class="text-center py-20 text-gray-700 italic">No text found.</p>';
+            }
+
+            document.getElementById('modal').classList.remove('hidden');
+            document.getElementById('modal').classList.remove('is-flipped');
+            document.getElementById('toggleView').textContent = 'Flip to Text';
+            document.body.style.overflow = 'hidden';
+        }
+
+        document.getElementById('toggleView').onclick = () => {
+            const modal = document.getElementById('modal');
+            const isFlipped = modal.classList.toggle('is-flipped');
+            document.getElementById('toggleView').textContent = isFlipped ? 'Flip to Cover' : 'Flip to Text';
+        };
+
+        document.getElementById('closeModal').onclick = () => {
+            document.getElementById('modal').classList.add('hidden');
+            document.getElementById('audioPlayer').pause();
+            document.body.style.overflow = 'auto';
+        };
+
+        fetchBooks();
+    </script>
+</body>
+</html>
+
+    <script>
+        let allBooks = [];
+        let filteredBooks = [];
+
+        async function fetchBooks() {
+            try {
+                const response = await fetch('/api/books');
+                allBooks = await response.json();
+                filteredBooks = [...allBooks];
+                renderBooks();
+            } catch (err) {
+                console.error(err);
+                document.getElementById('booksGrid').innerHTML = '<p class="text-red-500">Failed to load books.</p>';
+            }
+        }
+
+        function renderBooks() {
+            const grid = document.getElementById('booksGrid');
+            grid.innerHTML = filteredBooks.map(book => `
+                <div class="book-card cursor-pointer flex flex-col gap-3 group" onclick="openBook('${book.id}')">
+                    <div class="aspect-[3/4] bg-[#1a1a1a] rounded-xl overflow-hidden shadow-lg border border-[#222]">
+                        <img src="${book.cover || 'https://via.placeholder.com/300x400?text=No+Cover'}" 
+                             alt="${book.title}" class="w-full h-full object-cover">
+                    </div>
+                    <div class="px-1">
+                        <h3 class="font-bold text-sm text-gray-100 line-clamp-2 group-hover:text-orange-500 transition-colors">${book.title}</h3>
+                        <p class="text-xs text-gray-500 truncate mt-1">${book.author}</p>
+                    </div>
+                </div>
+            `).join('');
+        }
+
+        function formatSRT(srtText) {
+            // Simple SRT to HTML converter
+            const lines = srtText.split('\n');
+            let html = '';
+            let currentText = '';
+            let currentTime = '';
+
+            for (let i = 0; i < lines.length; i++) {
+                const line = lines[i].trim();
+                if (/^\d+$/.test(line)) continue; // Sequence number
+                if (line.includes(' --> ')) {
+                    currentTime = line.split(' --> ')[0].split(',')[0];
+                    continue;
+                }
+                if (line === '') {
+                    if (currentText) {
+                        html += `<div class="srt-line"><span class="srt-time">${currentTime}</span><span class="srt-text">${currentText}</span></div>`;
+                        currentText = '';
+                    }
+                    continue;
+                }
+                currentText += (currentText ? ' ' : '') + line;
+            }
+            return html || srtText;
+        }
+
+        function openBook(id) {
+            const book = allBooks.find(b => b.id === id);
+            if (!book) return;
+
+            document.getElementById('modalTitle').textContent = book.title;
+            document.getElementById('modalAuthor').textContent = book.author;
+            document.getElementById('modalCover').src = book.cover || 'https://via.placeholder.com/300x400?text=No+Cover';
+            
+            const player = document.getElementById('audioPlayer');
+            player.src = book.audio;
+            
+            const transcriptDiv = document.getElementById('transcriptContent');
+            transcriptDiv.innerHTML = '<div class="flex items-center justify-center h-full text-gray-500 italic">Preparing transcript...</div>';
+            
+            if (book.transcript) {
+                fetch(book.transcript)
+                    .then(r => r.text())
+                    .then(text => {
+                        if (book.transcript.endsWith('.srt')) {
+                            transcriptDiv.innerHTML = formatSRT(text);
+                        } else {
+                            transcriptDiv.innerHTML = marked.parse(text);
+                        }
+                    })
+                    .catch(e => {
+                        transcriptDiv.innerHTML = '<div class="p-4 text-red-500 bg-red-900/20 rounded">Error loading transcript content.</div>';
+                    });
+            } else {
+                transcriptDiv.innerHTML = '<div class="flex items-center justify-center h-full text-gray-600 italic">No transcript or captions found for this title.</div>';
+            }
+
+            document.getElementById('modal').classList.remove('hidden');
+            document.body.style.overflow = 'hidden';
+            // Reset focus mode
+            document.getElementById('modalContainer').classList.remove('focus-mode');
+        }
+
+        // Toggle Focus Mode
+        document.getElementById('toggleFocus').onclick = () => {
+            const container = document.getElementById('modalContainer');
+            const coverWrapper = document.getElementById('modalCoverWrapper');
+            const isFocus = container.classList.toggle('focus-mode');
+            
+            if (isFocus) {
+                coverWrapper.style.display = 'none';
+                document.getElementById('transcriptWrapper').classList.replace('md:w-3/5', 'md:w-full');
+            } else {
+                coverWrapper.style.display = 'flex';
+                document.getElementById('transcriptWrapper').classList.replace('md:w-full', 'md:w-3/5');
+            }
+        };
+
+        // Search logic
+        document.getElementById('search').addEventListener('input', (e) => {
+            const query = e.target.value.toLowerCase();
+            filteredBooks = allBooks.filter(book => 
+                book.title.toLowerCase().includes(query) || 
+                book.author.toLowerCase().includes(query)
+            );
+            renderBooks();
+        });
+
+        // Close modal
+        document.getElementById('closeModal').onclick = () => {
+            document.getElementById('modal').classList.add('hidden');
+            document.getElementById('audioPlayer').pause();
+            document.body.style.overflow = 'auto';
+        };
+
+        window.onclick = (e) => {
+            if (e.target === document.getElementById('modal')) {
+                document.getElementById('modal').classList.add('hidden');
+                document.getElementById('audioPlayer').pause();
+                document.body.style.overflow = 'auto';
+            }
+        };
+
+        fetchBooks();
+    </script>
+</body>
+</html>
